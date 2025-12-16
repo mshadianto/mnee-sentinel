@@ -212,7 +212,7 @@ MIT License - See LICENSE file for details
 
 ## 🛡️ Securing Treasuries with AI, One Transaction at a Time
 
-**Built with ❤️ for MNEE Hackathon 2024**
+**Built with ❤️ for MNEE Hackathon 2025**
 
 **Track**: Programmable Finance & Automation
 
