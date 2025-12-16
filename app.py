@@ -892,7 +892,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 2rem 0;'>
     <p style='font-size: 1.2rem; font-weight: bold;'>🛡️ MNEE Sentinel - AI-Powered Treasury Guardian</p>
-    <p>Built for MNEE Hackathon 2024 | Track: Programmable Finance & Automation</p>
+    <p>Built for MNEE Hackathon 2025 | Track: Programmable Finance & Automation</p>
     <p style='font-size: 0.9rem; margin-top: 1rem;'>
         Solving Real Coordination Problems Through AI-Driven Treasury Management
     </p>
