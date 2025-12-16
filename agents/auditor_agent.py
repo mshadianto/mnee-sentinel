@@ -1,357 +1,287 @@
 """
-AI Auditor Agent using LangChain (Enhanced)
-Supports: Groq (Llama 3), OpenAI (GPT-4), Anthropic (Claude)
-Evaluates treasury proposals against governance rules
+MNEE Sentinel - AI Auditor Agent
+Multi-provider AI compliance engine for treasury governance
+
+Compatible with LangChain 0.1.0+ and Streamlit Cloud
 """
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-from langchain_groq import ChatGroq
-from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import PydanticOutputParser
-from pydantic import BaseModel, Field
-from typing import Dict, Tuple, Literal
-from decimal import Decimal
-import logging
-import re
+
 import os
+import logging
+from typing import Dict, Optional, Any
+from datetime import datetime
 
-from config.settings import (
-    OPENAI_API_KEY,
-    ANTHROPIC_API_KEY,
-    CONFIDENCE_THRESHOLD
-)
-from utils.db_utils import GovernanceDB
+# Updated imports for LangChain 0.1.0+
+try:
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import StrOutputParser
+except ImportError:
+    # Fallback for older versions
+    from langchain.prompts import ChatPromptTemplate
+    from langchain.schema.output_parser import StrOutputParser
 
-logging.basicConfig(level=logging.INFO)
+# AI Provider imports
+try:
+    from langchain_groq import ChatGroq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+    ChatGroq = None
+
+try:
+    from langchain_openai import ChatOpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    ChatOpenAI = None
+
+try:
+    from langchain_anthropic import ChatAnthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+    ChatAnthropic = None
+
 logger = logging.getLogger(__name__)
 
+# System prompt for the auditor
+AUDITOR_SYSTEM_PROMPT = """You are an AI Treasury Auditor for a DAO/Company. Your role is to analyze payment proposals and determine if they should be APPROVED or REJECTED based on governance rules.
 
-# ===================================
-# Structured Output Model
-# ===================================
+GOVERNANCE RULES:
+1. Vendor must be in the whitelist
+2. Amount must not exceed budget limits for the category
+3. Amount must not exceed per-transaction limits
+4. Wallet address must be valid (42 characters, starts with 0x)
+5. Purpose must be clearly stated
 
-class ProposalAnalysis(BaseModel):
-    """Structured output from AI analysis"""
-    vendor_name: str = Field(description="Name of the vendor/recipient (e.g., PT Nusantara FX Services)")
-    vendor_address: str = Field(description="Ethereum wallet address (0x...)")
-    amount: float = Field(description="Amount in MNEE tokens")
-    category: str = Field(description="Budget category (FX, Remittance, Settlement, Software, Consulting, Travel, Office, Data, Cybersecurity, Legal)")
-    confidence: float = Field(description="Confidence score 0-1", ge=0, le=1)
-    interpretation: str = Field(description="Brief explanation of what was parsed")
+CONTEXT:
+- Whitelisted Vendors: {whitelisted_vendors}
+- Budget Limits: {budget_limits}
+- Transaction Velocity: {velocity_info}
+
+PROPOSAL TO ANALYZE:
+{proposal_text}
+
+EXTRACTED DATA:
+- Vendor: {vendor_name}
+- Amount: {amount} MNEE
+- Wallet: {wallet_address}
+- Category: {category}
+
+Analyze the proposal and respond with:
+1. DECISION: APPROVED or REJECTED
+2. CONFIDENCE: High/Medium/Low
+3. REASONING: Brief explanation (2-3 sentences)
+4. RISK_FLAGS: Any concerns (or "None")
+
+Format your response EXACTLY as:
+DECISION: [APPROVED/REJECTED]
+CONFIDENCE: [High/Medium/Low]
+REASONING: [Your explanation]
+RISK_FLAGS: [Any concerns or None]
+"""
 
 
 class AuditorAgent:
-    """AI-powered compliance auditor for treasury operations"""
+    """
+    Multi-provider AI Auditor Agent for treasury governance.
     
-    SUPPORTED_PROVIDERS = {
-        "groq": "Groq (Llama 3.1 70B) - ⚡ Fastest",
-        "openai": "OpenAI (GPT-4 Turbo) - 🎯 Most Accurate",
-        "anthropic": "Anthropic (Claude Sonnet 4) - 🧠 Best Reasoning"
-    }
+    Supports:
+    - Groq (Llama 3.1) - Fastest
+    - OpenAI (GPT-4) - Most accurate
+    - Anthropic (Claude) - Best reasoning
+    """
     
-    def __init__(
-        self, 
-        db: GovernanceDB,
-        provider: Literal["groq", "openai", "anthropic"] = "groq"
-    ):
-        self.db = db
-        self.provider = provider
-        self.llm = self._initialize_llm(provider)
+    def __init__(self, provider: str = "groq"):
+        """
+        Initialize the auditor agent.
         
-        # Output parser
-        self.parser = PydanticOutputParser(pydantic_object=ProposalAnalysis)
-        
-        # Enhanced prompt template
+        Args:
+            provider: AI provider - "groq", "openai", or "anthropic"
+        """
+        self.provider = provider.lower()
+        self.llm = self._initialize_llm()
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a financial compliance AI for an Indonesian DAO treasury system managing MNEE tokens.
-
-Your job is to extract key information from payment proposals with HIGH PRECISION.
-
-Extract the following fields:
-1. **vendor_name**: Full company name (e.g., "PT Nusantara FX Services")
-2. **vendor_address**: Ethereum wallet address (must start with 0x and be 42 characters)
-3. **amount**: Numerical amount in MNEE tokens (just the number, no currency symbol)
-4. **category**: One of these EXACT categories:
-   - FX (Foreign Exchange)
-   - Remittance (Money Transfer)
-   - Settlement (Bank Settlement)
-   - Software (Software/Cloud Services)
-   - Consulting (Advisory/Consulting)
-   - Travel (Corporate Travel)
-   - Office (Office Supplies)
-   - Data (Data Feeds/Analytics)
-   - Cybersecurity (Security Services)
-   - Legal (Legal Services)
-
-**IMPORTANT RULES:**
-- If wallet address is missing or invalid, set confidence < 0.5
-- If amount is unclear, set confidence < 0.6
-- Category MUST be one of the 10 listed above
-- Indonesian vendor names often start with "PT" (Perseroan Terbatas)
-
-{format_instructions}
-
-Be precise. Extract only facts, no assumptions."""),
-            ("human", "{proposal}")
+            ("system", AUDITOR_SYSTEM_PROMPT),
+            ("human", "Please analyze this proposal and provide your decision.")
         ])
-    
-    def _initialize_llm(self, provider: str):
-        """Initialize LLM based on selected provider"""
-        groq_api_key = os.getenv("GROQ_API_KEY", "")
+        self.chain = self.prompt | self.llm | StrOutputParser()
         
-        if provider == "groq" and groq_api_key:
-            logger.info("🚀 Initializing Groq (Llama 3.1 70B)")
+        logger.info(f"✅ AuditorAgent initialized with provider: {self.provider}")
+    
+    def _initialize_llm(self):
+        """Initialize the LLM based on provider selection."""
+        
+        if self.provider == "groq":
+            if not GROQ_AVAILABLE:
+                raise ImportError("langchain-groq not installed. Run: pip install langchain-groq")
+            api_key = os.getenv("GROQ_API_KEY")
+            if not api_key:
+                raise ValueError("GROQ_API_KEY not found in environment")
             return ChatGroq(
                 model="llama-3.1-70b-versatile",
-                groq_api_key=groq_api_key,
-                temperature=0,
-                max_tokens=2048
+                temperature=0.1,
+                api_key=api_key
             )
-        elif provider == "anthropic" and ANTHROPIC_API_KEY:
-            logger.info("🧠 Initializing Anthropic (Claude Sonnet 4)")
-            return ChatAnthropic(
-                model="claude-sonnet-4-20250514",
-                anthropic_api_key=ANTHROPIC_API_KEY,
-                temperature=0,
-                max_tokens=2048
-            )
-        elif provider == "openai" and OPENAI_API_KEY:
-            logger.info("🎯 Initializing OpenAI (GPT-4 Turbo)")
+        
+        elif self.provider == "openai":
+            if not OPENAI_AVAILABLE:
+                raise ImportError("langchain-openai not installed. Run: pip install langchain-openai")
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not found in environment")
             return ChatOpenAI(
                 model="gpt-4-turbo-preview",
-                openai_api_key=OPENAI_API_KEY,
-                temperature=0,
-                max_tokens=2048
+                temperature=0.1,
+                api_key=api_key
             )
+        
+        elif self.provider == "anthropic":
+            if not ANTHROPIC_AVAILABLE:
+                raise ImportError("langchain-anthropic not installed. Run: pip install langchain-anthropic")
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not found in environment")
+            return ChatAnthropic(
+                model="claude-3-sonnet-20240229",
+                temperature=0.1,
+                api_key=api_key
+            )
+        
         else:
-            # Fallback to OpenAI
-            if OPENAI_API_KEY:
-                logger.warning(f"⚠️ {provider} not available, falling back to OpenAI")
-                return ChatOpenAI(
-                    model="gpt-4-turbo-preview",
-                    openai_api_key=OPENAI_API_KEY,
-                    temperature=0
-                )
-            raise ValueError(f"No valid API key for provider: {provider}")
+            raise ValueError(f"Unknown provider: {self.provider}. Use 'groq', 'openai', or 'anthropic'")
     
-    def switch_provider(self, new_provider: str):
-        """Dynamically switch AI provider"""
-        if new_provider not in self.SUPPORTED_PROVIDERS:
-            raise ValueError(f"Unsupported provider: {new_provider}")
-        
-        self.provider = new_provider
-        self.llm = self._initialize_llm(new_provider)
-        logger.info(f"✅ Switched to {self.SUPPORTED_PROVIDERS[new_provider]}")
-    
-    def parse_proposal(self, proposal_text: str) -> Tuple[bool, ProposalAnalysis]:
+    def audit_proposal(
+        self,
+        proposal_text: str,
+        vendor_name: str = "Unknown",
+        amount: float = 0.0,
+        wallet_address: str = "",
+        category: str = "Unknown",
+        whitelisted_vendors: str = "None provided",
+        budget_limits: str = "None provided",
+        velocity_info: str = "None provided"
+    ) -> Dict[str, Any]:
         """
-        Parse natural language proposal using AI
+        Audit a treasury proposal.
         
+        Args:
+            proposal_text: The full proposal text
+            vendor_name: Extracted vendor name
+            amount: Amount in MNEE
+            wallet_address: Target wallet address
+            category: Expense category
+            whitelisted_vendors: List of approved vendors
+            budget_limits: Budget constraints
+            velocity_info: Recent transaction velocity
+            
         Returns:
-            Tuple[bool, ProposalAnalysis]: (success, parsed_data)
+            Dictionary with decision, confidence, reasoning, risk_flags
         """
         try:
-            chain = self.prompt | self.llm | self.parser
-            
-            result = chain.invoke({
-                "proposal": proposal_text,
-                "format_instructions": self.parser.get_format_instructions()
+            # Invoke the chain
+            response = self.chain.invoke({
+                "proposal_text": proposal_text,
+                "vendor_name": vendor_name,
+                "amount": amount,
+                "wallet_address": wallet_address,
+                "category": category,
+                "whitelisted_vendors": whitelisted_vendors,
+                "budget_limits": budget_limits,
+                "velocity_info": velocity_info
             })
             
-            logger.info(f"✅ [{self.provider.upper()}] Parsed with {result.confidence:.0%} confidence")
-            return True, result
+            # Parse response
+            result = self._parse_response(response)
+            result["provider"] = self.provider
+            result["timestamp"] = datetime.now().isoformat()
+            result["raw_response"] = response
+            
+            return result
             
         except Exception as e:
-            logger.error(f"❌ [{self.provider.upper()}] Parsing error: {e}")
-            # Fallback to regex
-            return self._fallback_parse(proposal_text)
+            logger.error(f"Audit failed: {e}")
+            return {
+                "decision": "ERROR",
+                "confidence": "Low",
+                "reasoning": f"Audit failed: {str(e)}",
+                "risk_flags": "System error",
+                "provider": self.provider,
+                "timestamp": datetime.now().isoformat(),
+                "error": str(e)
+            }
     
-    def _fallback_parse(self, proposal_text: str) -> Tuple[bool, ProposalAnalysis]:
-        """Regex-based fallback parser for when AI fails"""
-        try:
-            # Extract amount
-            amount_match = re.search(r'(\d+(?:\.\d+)?)\s*MNEE', proposal_text, re.IGNORECASE)
-            amount = float(amount_match.group(1)) if amount_match else 0
-            
-            # Extract address
-            address_match = re.search(r'(0x[a-fA-F0-9]{40})', proposal_text)
-            address = address_match.group(1) if address_match else ""
-            
-            # Extract vendor name (PT companies)
-            vendor_match = re.search(r'(PT\s+[A-Z][a-zA-Z\s&]+?)(?:\s+|,|for|at)', proposal_text)
-            if not vendor_match:
-                vendor_match = re.search(r'to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', proposal_text)
-            vendor = vendor_match.group(1).strip() if vendor_match else "Unknown Vendor"
-            
-            # Guess category from context
-            category_keywords = {
-                'FX': ['forex', 'fx', 'hedging', 'currency'],
-                'Remittance': ['remittance', 'transfer', 'money transfer'],
-                'Settlement': ['settlement', 'bank', 'clearing'],
-                'Software': ['software', 'cloud', 'saas', 'tools'],
-                'Consulting': ['consulting', 'advisory', 'audit'],
-                'Travel': ['travel', 'trip', 'flight'],
-                'Office': ['office', 'supplies', 'stationery'],
-                'Data': ['data', 'feed', 'analytics'],
-                'Cybersecurity': ['security', 'cybersecurity', 'protection'],
-                'Legal': ['legal', 'law', 'compliance']
-            }
-            
-            category = "Office"  # Default
-            for cat, keywords in category_keywords.items():
-                if any(kw in proposal_text.lower() for kw in keywords):
-                    category = cat
-                    break
-            
-            logger.warning("⚠️ Using fallback regex parser (low confidence)")
-            return True, ProposalAnalysis(
-                vendor_name=vendor,
-                vendor_address=address,
-                amount=amount,
-                category=category,
-                confidence=0.45,
-                interpretation="⚠️ Parsed using fallback regex (AI parsing failed)"
-            )
-        except Exception as e:
-            logger.error(f"❌ Fallback parse failed: {e}")
-            return False, None
-    
-    def audit_proposal(self, proposal_text: str) -> Dict:
-        """
-        Main audit function - evaluates proposal against all rules
-        
-        Returns:
-            Dict with keys: decision, reasoning, details, confidence, parsed_data, provider
-        """
-        # Step 1: Parse the proposal
-        success, parsed = self.parse_proposal(proposal_text)
-        
-        if not success or parsed.confidence < CONFIDENCE_THRESHOLD:
-            return {
-                "decision": "REJECTED",
-                "reasoning": f"❌ Unable to parse proposal with sufficient confidence\n\nGot {parsed.confidence:.0%} confidence, need {CONFIDENCE_THRESHOLD:.0%}\n\nIssue: {parsed.interpretation if parsed else 'Complete parsing failure'}",
-                "details": {"parsing_failed": True},
-                "confidence": parsed.confidence if parsed else 0,
-                "parsed_data": parsed,
-                "provider": self.provider
-            }
-        
-        # Step 2: Validate wallet address format
-        from utils.crypto_utils import MNEETokenManager
-        token_manager = MNEETokenManager()
-        if not token_manager.validate_address(parsed.vendor_address):
-            return {
-                "decision": "REJECTED",
-                "reasoning": f"❌ Invalid Ethereum Address\n\nProvided: {parsed.vendor_address}\nExpected: Valid 0x... address (42 characters)",
-                "details": {"parsed": parsed.dict(), "address_validation": "FAILED"},
-                "confidence": parsed.confidence,
-                "parsed_data": parsed,
-                "provider": self.provider
-            }
-        
-        # Step 3: Check vendor whitelist
-        is_whitelisted, vendor_data = self.db.is_vendor_whitelisted(parsed.vendor_address)
-        if not is_whitelisted:
-            return {
-                "decision": "REJECTED",
-                "reasoning": f"❌ Vendor Not Whitelisted\n\nVendor: {parsed.vendor_name}\nAddress: {parsed.vendor_address}\n\nThis vendor is not authorized to receive treasury funds.",
-                "details": {
-                    "parsed": parsed.dict(),
-                    "whitelist_check": "FAILED"
-                },
-                "confidence": parsed.confidence,
-                "parsed_data": parsed,
-                "provider": self.provider
-            }
-        
-        # Step 4: Check vendor transaction limit
-        vendor_limit = Decimal(str(vendor_data['max_transaction_limit']))
-        if Decimal(str(parsed.amount)) > vendor_limit:
-            return {
-                "decision": "REJECTED",
-                "reasoning": f"❌ Exceeds Vendor Transaction Limit\n\nRequested: {parsed.amount} MNEE\nVendor Limit: {vendor_limit} MNEE\nOverage: {Decimal(str(parsed.amount)) - vendor_limit} MNEE",
-                "details": {
-                    "parsed": parsed.dict(),
-                    "whitelist_check": "PASSED",
-                    "vendor_limit_check": "FAILED",
-                    "vendor_limit": float(vendor_limit)
-                },
-                "confidence": parsed.confidence,
-                "parsed_data": parsed,
-                "provider": self.provider
-            }
-        
-        # Step 5: Check category budget
-        remaining, total = self.db.get_remaining_budget(vendor_data['category'])
-        if Decimal(str(parsed.amount)) > remaining:
-            return {
-                "decision": "REJECTED",
-                "reasoning": f"❌ Insufficient Budget in {vendor_data['category']} Category\n\nRequired: {parsed.amount} MNEE\nRemaining: {remaining} MNEE\nTotal Budget: {total} MNEE\nShortfall: {Decimal(str(parsed.amount)) - remaining} MNEE",
-                "details": {
-                    "parsed": parsed.dict(),
-                    "whitelist_check": "PASSED",
-                    "vendor_limit_check": "PASSED",
-                    "budget_check": "FAILED",
-                    "remaining_budget": float(remaining),
-                    "total_budget": float(total)
-                },
-                "confidence": parsed.confidence,
-                "parsed_data": parsed,
-                "provider": self.provider
-            }
-        
-        # Step 6: Check transaction velocity
-        is_safe, velocity_reason = self.db.check_transaction_velocity(
-            parsed.vendor_address,
-            Decimal(str(parsed.amount))
-        )
-        if not is_safe:
-            return {
-                "decision": "REJECTED",
-                "reasoning": f"❌ Transaction Velocity Alert\n\n{velocity_reason}\n\nThis may indicate fraudulent activity or duplicate submissions.",
-                "details": {
-                    "parsed": parsed.dict(),
-                    "whitelist_check": "PASSED",
-                    "vendor_limit_check": "PASSED",
-                    "budget_check": "PASSED",
-                    "velocity_check": "FAILED"
-                },
-                "confidence": parsed.confidence,
-                "parsed_data": parsed,
-                "provider": self.provider
-            }
-        
-        # ✅ ALL CHECKS PASSED
-        return {
-            "decision": "APPROVED",
-            "reasoning": f"""✅ **ALL COMPLIANCE CHECKS PASSED**
-
-**Vendor Information:**
-• Name: {parsed.vendor_name}
-• Address: {parsed.vendor_address}
-• Category: {vendor_data['category']}
-
-**Financial Validation:**
-• Amount: {parsed.amount} MNEE
-• Vendor Limit: {vendor_limit} MNEE ✓
-• Budget Remaining: {remaining} MNEE (of {total} total) ✓
-• Velocity Check: PASSED ✓
-
-**AI Analysis:**
-• Confidence: {parsed.confidence:.0%}
-• Provider: {self.SUPPORTED_PROVIDERS[self.provider]}
-            """,
-            "details": {
-                "parsed": parsed.dict(),
-                "whitelist_check": "PASSED",
-                "vendor_limit_check": "PASSED",
-                "budget_check": "PASSED",
-                "velocity_check": "PASSED",
-                "vendor_data": vendor_data,
-                "remaining_budget": float(remaining),
-                "total_budget": float(total)
-            },
-            "confidence": parsed.confidence,
-            "parsed_data": parsed,
-            "provider": self.provider
+    def _parse_response(self, response: str) -> Dict[str, str]:
+        """Parse the LLM response into structured data."""
+        result = {
+            "decision": "UNKNOWN",
+            "confidence": "Low",
+            "reasoning": "",
+            "risk_flags": "None"
         }
+        
+        lines = response.strip().split("\n")
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith("DECISION:"):
+                decision = line.replace("DECISION:", "").strip().upper()
+                if "APPROVED" in decision:
+                    result["decision"] = "APPROVED"
+                elif "REJECTED" in decision or "REJECT" in decision:
+                    result["decision"] = "REJECTED"
+                else:
+                    result["decision"] = decision
+            elif line.startswith("CONFIDENCE:"):
+                result["confidence"] = line.replace("CONFIDENCE:", "").strip()
+            elif line.startswith("REASONING:"):
+                result["reasoning"] = line.replace("REASONING:", "").strip()
+            elif line.startswith("RISK_FLAGS:"):
+                result["risk_flags"] = line.replace("RISK_FLAGS:", "").strip()
+        
+        # If reasoning spans multiple lines, try to capture more
+        if not result["reasoning"] and len(lines) > 2:
+            result["reasoning"] = " ".join(lines[2:4])
+        
+        return result
+    
+    def get_provider_info(self) -> Dict[str, Any]:
+        """Get information about the current provider."""
+        providers = {
+            "groq": {
+                "name": "Groq (Llama 3.1)",
+                "model": "llama-3.1-70b-versatile",
+                "speed": "Fastest",
+                "cost": "Free tier available"
+            },
+            "openai": {
+                "name": "OpenAI (GPT-4)",
+                "model": "gpt-4-turbo-preview",
+                "speed": "Medium",
+                "cost": "Pay per token"
+            },
+            "anthropic": {
+                "name": "Anthropic (Claude)",
+                "model": "claude-3-sonnet-20240229",
+                "speed": "Medium",
+                "cost": "Pay per token"
+            }
+        }
+        return providers.get(self.provider, {"name": "Unknown"})
+
+
+def get_available_providers() -> Dict[str, bool]:
+    """Check which AI providers are available."""
+    return {
+        "groq": GROQ_AVAILABLE and bool(os.getenv("GROQ_API_KEY")),
+        "openai": OPENAI_AVAILABLE and bool(os.getenv("OPENAI_API_KEY")),
+        "anthropic": ANTHROPIC_AVAILABLE and bool(os.getenv("ANTHROPIC_API_KEY"))
+    }
+
+
+if __name__ == "__main__":
+    print("🤖 MNEE Sentinel - AI Auditor Agent")
+    print("=" * 50)
+    print("\nAvailable providers:")
+    for provider, available in get_available_providers().items():
+        status = "✅" if available else "❌"
+        print(f"  {status} {provider}")

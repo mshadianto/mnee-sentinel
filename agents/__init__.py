@@ -1,4 +1,7 @@
-"""AI Agents package for MNEE Sentinel"""
-from .auditor_agent import AuditorAgent
+"""
+MNEE Sentinel - AI Agents Module
+"""
 
-__all__ = ['AuditorAgent']
+from .auditor_agent import AuditorAgent, get_available_providers
+
+__all__ = ['AuditorAgent', 'get_available_providers']
