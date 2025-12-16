@@ -384,7 +384,7 @@ with tab1:
             st.rerun()
     
     if submit_button and proposal_text:
-        with st.spinner(f"🤖 {agent.SUPPORTED_PROVIDERS[ai_provider]} analyzing proposal..."):
+        with st.spinner(f"🤖 {ai_provider.upper()} analyzing proposal..."):
             # Run AI audit
             audit_result = agent.audit_proposal(proposal_text)
             
