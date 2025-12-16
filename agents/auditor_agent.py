@@ -91,13 +91,15 @@ class AuditorAgent:
     - Anthropic (Claude) - Best reasoning
     """
     
-    def __init__(self, provider: str = "groq"):
+    def __init__(self, db=None, provider: str = "groq"):
         """
         Initialize the auditor agent.
         
         Args:
+            db: Database connection (optional, for backward compatibility)
             provider: AI provider - "groq", "openai", or "anthropic"
         """
+        self.db = db  # Store db reference if needed
         self.provider = provider.lower()
         self.llm = self._initialize_llm()
         self.prompt = ChatPromptTemplate.from_messages([
