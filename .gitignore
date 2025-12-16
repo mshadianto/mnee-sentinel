@@ -1,0 +1,104 @@
+# ===================================
+# MNEE Sentinel - GitIgnore
+# CRITICAL: Prevents API key leaks
+# ===================================
+
+# ===================================
+# ENVIRONMENT & SECRETS (NEVER COMMIT!)
+# ===================================
+.env
+.env.local
+.env.production
+*.key
+*.pem
+private_keys/
+
+# ===================================
+# Python
+# ===================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ===================================
+# Virtual Environments
+# ===================================
+venv/
+ENV/
+env/
+.venv
+
+# ===================================
+# Streamlit
+# ===================================
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# ===================================
+# IDE
+# ===================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===================================
+# OS
+# ===================================
+.DS_Store
+Thumbs.db
+*.log
+
+# ===================================
+# PDF Processing Output
+# ===================================
+hasil_konversi/
+*.pdf
+temp_uploads/
+
+# ===================================
+# Database Backups (if local)
+# ===================================
+*.db
+*.sqlite
+*.sqlite3
+
+# ===================================
+# Testing
+# ===================================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ===================================
+# Documentation Build
+# ===================================
+docs/_build/
+
+# ===================================
+# CRITICAL REMINDER
+# ===================================
+# Files that should NEVER be committed:
+# - .env (contains API keys)
+# - Private keys for wallets
+# - Database credentials
+# - Any file with "secret" or "password" in name
+# ===================================
